@@ -1,8 +1,4 @@
 requests
-logging
-language_utils
-re
-typing
 flask
 flask-cors
 huggingface_hub
