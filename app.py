@@ -14,15 +14,15 @@ CORS(app)
 app.secret_key = os.environ.get("SESSION_SECRET", "alexa-multilingual-skill-secret")
 
 # Get API tokens from environment variables
-HF_TOKEN = os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") # SECURITY: no hardcoding
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # API endpoints
-HF_API_URL = "https://api-inference.huggingface.co/models/gpt2"
+HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
-def query_openai_api(prompt, system_prompt):
-    """Query OpenAI API for chat completions"""
+def query_openai_api(messages):
+    """Query OpenAI API for chat completions using messages array"""
     if not OPENAI_API_KEY:
         return None
     
@@ -33,10 +33,10 @@ def query_openai_api(prompt, system_prompt):
     
     payload = {
         "model": "gpt-3.5-turbo",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
+        "messages": messages,
+														 
+											   
+		  
         "max_tokens": 150,
         "temperature": 0.7
     }
@@ -53,8 +53,8 @@ def query_openai_api(prompt, system_prompt):
         logger.error(f"Error calling OpenAI API: {e}")
         return None
 
-def query_huggingface_api(prompt, system_prompt):
-    """Query HuggingFace API directly with HTTP requests"""
+def query_huggingface_api(messages):
+    """Query HuggingFace API directly with HTTP requests using chat messages array"""
     if not HF_TOKEN:
         return None
     
@@ -63,16 +63,10 @@ def query_huggingface_api(prompt, system_prompt):
         "Content-Type": "application/json"
     }
     
-    formatted_prompt = f"{prompt}"
-    
+								  
+	
     payload = {
-        "inputs": formatted_prompt,
-        "parameters": {
-            "max_length": 150,
-            "temperature": 0.7,
-            "do_sample": True,
-            "pad_token_id": 50256
-        }
+        "inputs": messages
     }
     
     try:
@@ -81,8 +75,10 @@ def query_huggingface_api(prompt, system_prompt):
             result = response.json()
             if isinstance(result, list) and len(result) > 0:
                 generated_text = result[0].get("generated_text", "").strip()
-                if generated_text.startswith(formatted_prompt):
-                    generated_text = generated_text[len(formatted_prompt):].strip()
+                # If the model returns an echoed prompt, try to trim it out
+                user_content = messages[-1]["content"]
+                if generated_text.startswith(user_content):
+                    generated_text = generated_text[len(user_content):].strip()
                 return generated_text
         else:
             logger.error(f"HuggingFace API error: {response.status_code} - {response.text}")
@@ -91,9 +87,9 @@ def query_huggingface_api(prompt, system_prompt):
         logger.error(f"Error calling HuggingFace API: {e}")
         return None
 
-def get_fallback_response(prompt, language):
+def get_fallback_response(user_query, language):
     """Generate fallback responses when APIs are unavailable"""
-    prompt_lower = prompt.lower()
+    prompt_lower = user_query.lower()
     
     if language == "hi":
         responses = {
@@ -104,7 +100,7 @@ def get_fallback_response(prompt, language):
             "name": "मैं एक AI सहायक हूँ जो हिंदी और अंग्रेजी में बात कर सकता हूँ।",
             "help": "मैं सवालों के जवाब दे सकता हूँ और बातचीत कर सकता हूँ। कुछ और पूछिए!"
         }
-        default = "यह दिलचस्प सवाल है। मैं इसके बारे में और जानना चाहूँगा। क्या आप कुछ और बता सकते हैं?"
+        default = "यह दिलचस्प सवाल है। मैं इसके बारे मे��� और जानना चाहूँगा। क्या आप कुछ और बता सकते हैं?"
     else:
         responses = {
             "hello": "Hello! I'm here to help you.",
@@ -119,23 +115,49 @@ def get_fallback_response(prompt, language):
     for key, response in responses.items():
         if key in prompt_lower:
             return response
-    
+	
     return default
 
-def query_ai_api(prompt, system_prompt, detected_language="en"):
-    """Try OpenAI first, fallback to HuggingFace, then local fallback"""
+def query_ai_api(messages, user_query, detected_language="en"):
+    """Try OpenAI first, fallback to HuggingFace, then local fallback, using message history array"""
     # Try OpenAI first
-    result = query_openai_api(prompt, system_prompt)
+    result = query_openai_api(messages)
     if result:
         return result
     
     # Fallback to HuggingFace
-    result = query_huggingface_api(prompt, system_prompt)
+    result = query_huggingface_api(messages)
     if result:
         return result
     
     # Final fallback - always return something
-    return get_fallback_response(prompt, detected_language)
+    return get_fallback_response(user_query, detected_language)
+
+def build_chat_messages_from_history(history, user_query, system_prompt=None):
+    """
+    Convert chat history and user's current Alexa question into chat-completions 'messages' format.
+    Optionally prepend a system prompt (for models like OpenAI/Mistral).
+	
+																 
+											  
+																  
+	
+																					  
+    """
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    # Add previous turns as user/assistant pairs
+    for turn in history:
+        if turn.get("user"):
+            messages.append({"role": "user", "content": turn["user"]})
+        if turn.get("assistant"):
+            messages.append({"role": "assistant", "content": turn["assistant"]})
+
+    # Add the latest user turn
+    messages.append({"role": "user", "content": user_query})
+    return messages
 
 # In-memory history storage per Alexa session with language context
 chat_history = {}
@@ -147,7 +169,7 @@ def index():
 
 @app.route("/alexa", methods=["POST"])
 def alexa_webhook():
-    """Enhanced Alexa webhook with Hindi and English language support"""
+    """Enhanced Alexa webhook with Hindi and English language support, using chat-completions format"""
     try:
         payload = request.get_json()
         logger.debug(f"Received Alexa payload: {payload}")
@@ -202,20 +224,21 @@ def alexa_webhook():
             session_data["primary_language"] = detected_language
             logger.info(f"Updated primary language for session {session_id} to {detected_language}")
         
-        # Build conversation context from history (last 3 turns)
+        # Build chat-completions messages from history (last 3 turns for model context)
         history = session_data["messages"]
-        prompt_lines = []
-        for turn in history[-3:]:
-            prompt_lines.append(f"User: {turn['user']}")
-            prompt_lines.append(f"Assistant: {turn['assistant']}")
-        prompt_lines.append(f"User: {user_query}")
-        prompt_text = "\n".join(prompt_lines) + "\nAssistant:"
-        
-        # Get language-specific system prompt
+						 
+								 
+														
+																  
+												  
+															  
+		
+											 
         system_prompt = get_system_prompt(detected_language)
+        messages = build_chat_messages_from_history(history[-3:], user_query, system_prompt)
         
-        # Call AI API with fallback system
-        ai_reply = query_ai_api(prompt_text, system_prompt, detected_language)
+        # Call AI API with fallback system using chat-format messages
+        ai_reply = query_ai_api(messages, user_query, detected_language)
         
         if ai_reply is None:
             error_messages = get_error_messages(detected_language)
