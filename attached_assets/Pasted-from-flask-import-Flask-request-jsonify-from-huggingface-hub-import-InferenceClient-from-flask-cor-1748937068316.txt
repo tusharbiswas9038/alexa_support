@@ -1,0 +1,107 @@
+from flask import Flask, request, jsonify
+from huggingface_hub import InferenceClient
+from flask_cors import CORS
+import logging
+
+app = Flask(__name__)
+CORS(app)
+
+# Replace with your actual Hugging Face access token
+HF_TOKEN = "hf_xxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Initialize the InferenceClient once
+client = InferenceClient(
+    provider="auto",
+    api_key=HF_TOKEN
+)
+
+# In-memory history storage per Alexa session (not persistent)
+chat_history = {}
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@app.route("/alexa", methods=["POST"])
+def alexa_webhook():
+    try:
+        payload = request.get_json()
+        session_id = payload["session"]["sessionId"]
+        user_query = payload["request"]["intent"]["slots"]["query"]["value"]
+
+        # Build up to the last 3 turns of conversation for context
+        history = chat_history.get(session_id, [])
+        prompt_lines = []
+        for turn in history[-3:]:
+            prompt_lines.append(f"User: {turn['user']}")
+            prompt_lines.append(f"Assistant: {turn['assistant']}")
+        prompt_lines.append(f"User: {user_query}")
+        prompt_text = "\n".join(prompt_lines) + "\nAssistant:"
+
+        # Call Hugging Face non-streaming completion
+        completion = client.chat.completions.create(
+            model="mistralai/mistral-tiny",  # Recommended lightweight model
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user",   "content": prompt_text}
+            ],
+        )
+
+        # Extract the assistant’s reply
+        ai_reply = completion.choices[0].message.content.strip()
+
+        # Update in-memory history
+        history.append({"user": user_query, "assistant": ai_reply})
+        chat_history[session_id] = history
+
+        # Return Alexa-compatible JSON
+        return jsonify({
+            "version": "1.0",
+            "response": {
+                "outputSpeech": {
+                    "type": "PlainText",
+                    "text": ai_reply
+                },
+                "shouldEndSession": True
+            }
+        })
+
+    except KeyError as ke:
+        logger.error(f"Missing key in request payload: {ke}")
+        return jsonify({
+            "version": "1.0",
+            "response": {
+                "outputSpeech": {
+                    "type": "PlainText",
+                    "text": "Sorry, I couldn't understand your request."
+                },
+                "shouldEndSession": True
+            }
+        })
+    except requests.exceptions.RequestException as re:
+        logger.error(f"HTTP error during inference call: {re}")
+        return jsonify({
+            "version": "1.0",
+            "response": {
+                "outputSpeech": {
+                    "type": "PlainText",
+                    "text": "The AI service is currently unavailable. Please try again later."
+                },
+                "shouldEndSession": True
+            }
+        })
+    except Exception as e:
+        logger.exception("Unexpected error in Alexa webhook")
+        return jsonify({
+            "version": "1.0",
+            "response": {
+                "outputSpeech": {
+                    "type": "PlainText",
+                    "text": "An unexpected error occurred."
+                },
+                "shouldEndSession": True
+            }
+        })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
