@@ -54,31 +54,42 @@ def query_openai_api(messages):
         return None
 
 def query_huggingface_api(messages):
-    """Query HuggingFace API directly with HTTP requests using chat messages array"""
     if not HF_TOKEN:
         return None
-    
+
+    # Build the prompt as before:
+    prompt = ""
+    if messages and messages[0].get("role") == "system":
+        prompt += messages[0]["content"].strip() + "\n"
+    user_turns = messages[1:] if messages and messages[0].get("role") == "system" else messages
+    for m in user_turns:
+        if m["role"] == "user":
+            prompt += f"User: {m['content'].strip()}\n"
+        elif m["role"] == "assistant":
+            prompt += f"Assistant: {m['content'].strip()}\n"
+    prompt += "Assistant:"
+
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "application/json"
     }
-    
-								  
-	
-    payload = {
-        "inputs": messages
-    }
-    
+    payload = {"inputs": prompt}
     try:
         response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
         if response.status_code == 200:
             result = response.json()
             if isinstance(result, list) and len(result) > 0:
                 generated_text = result[0].get("generated_text", "").strip()
-                # If the model returns an echoed prompt, try to trim it out
-                user_content = messages[-1]["content"]
-                if generated_text.startswith(user_content):
-                    generated_text = generated_text[len(user_content):].strip()
+                # Extract only the FIRST assistant reply after the input prompt.
+                if "Assistant:" in generated_text:
+                    answer_part = generated_text.split("Assistant:", 1)[1]
+                    # If the model continues with any new "User:"/question, truncate at that point.
+                    answer_lines = answer_part.split("User:", 1)[0]
+                    # Optionally just take the first sentence for even shorter Alexa reply
+                    answer_lines = answer_lines.strip()
+                    # If there's nothing, fall back to all generated_text (safety)
+                    if answer_lines:
+                        return answer_lines
                 return generated_text
         else:
             logger.error(f"HuggingFace API error: {response.status_code} - {response.text}")
