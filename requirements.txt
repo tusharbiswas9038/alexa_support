@@ -1,6 +1,5 @@
 requests
 logging
-os
 language_utils
 re
 typing
